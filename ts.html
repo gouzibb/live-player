@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播播放器</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #000;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            height: 100vh;
+            cursor: pointer;
+        }
+        
+        #video {
+            width: 100%;
+            height: 100vh;
+            object-fit: contain;
+            background-color: #000;
+            opacity: 1 !important;
+        }
+        
+        #video::-webkit-media-controls-panel {
+            display: flex !important;
+            opacity: 1 !important;
+            transition: opacity 0.3s !important;
+        }
+        
+        #video:not([data-user-interacted])::-webkit-media-controls-panel {
+            opacity: 0.3 !important;
+        }
+        
+        #video:hover::-webkit-media-controls-panel {
+            opacity: 1 !important;
+        }
+        
+        .loading {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <video id="video" controls playsinline></video>
+    
+    <div class="loading" id="loading">加载中...</div>
+    
+    <script>
+        (function() {
+            console.log('直播播放器启动');
+            
+            const video = document.getElementById('video');
+            const loading = document.getElementById('loading');
+            const streamUrl = 'https://live-1319755666.cos.ap-guangzhou.myqcloud.com/ezlive/stream.m3u8';
+            
+            // ==================== 初始音量设置 ====================
+            // 设置初始音量为50%（不静音）
+            video.volume = 0.5;
+            video.muted = false;
+            
+            // ==================== 播放状态变量 ====================
+            let isPlaying = false;
+            let playAttempts = 0;
+            let hlsInstance = null;
+
+            // ==================== 手机音量键支持 ====================
+            // 监听音量键事件
+            let lastVolume = 0.5; // 记录上次音量
+            
+            // 监听音量变化事件
+            video.addEventListener('volumechange', function() {
+                lastVolume = video.volume;
+                console.log('音量变化:', Math.round(video.volume * 100) + '%');
+            });
+            
+            // 针对Android和iOS的音量键支持
+            function handleVolumeKeyPress(e) {
+                // 仅在视频播放时处理音量键
+                if (video.src && video.readyState > 0) {
+                    // 检测音量键的方法：可以通过keydown事件间接处理
+                    // 但更可靠的是通过音量变化事件
+                    // 这里我们添加一个全局键盘事件监听，用于调试
+                    console.log('键盘事件:', e.key, e.code);
+                    
+                    // 音量增/减键的键码
+                    if (e.key === 'AudioVolumeUp' || e.key === 'VolumeUp' || e.code === 'VolumeUp') {
+                        e.preventDefault();
+                        increaseVolume();
+                        return;
+                    }
+                    
+                    if (e.key === 'AudioVolumeDown' || e.key === 'VolumeDown' || e.code === 'VolumeDown') {
+                        e.preventDefault();
+                        decreaseVolume();
+                        return;
+                    }
+                }
+            }
+            
+            function increaseVolume() {
+                let newVolume = video.volume + 0.1;
+                if (newVolume > 1) newVolume = 1;
+                video.volume = newVolume;
+                showVolumeToast();
+            }
+            
+            function decreaseVolume() {
+                let newVolume = video.volume - 0.1;
+                if (newVolume < 0) newVolume = 0;
+                video.volume = newVolume;
+                showVolumeToast();
+            }
+            
+            function showVolumeToast() {
+                // 创建或获取音量提示
+                let toast = document.getElementById('volume-toast');
+                if (!toast) {
+                    toast = document.createElement('div');
+                    toast.id = 'volume-toast';
+                    toast.style.cssText = `
+                        position: fixed;
+                        top: 20px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        background: rgba(0, 0, 0, 0.8);
+                        color: white;
+                        padding: 8px 16px;
+                        border-radius: 4px;
+                        z-index: 10000;
+                        font-size: 14px;
+                        display: none;
+                    `;
+                    document.body.appendChild(toast);
+                }
+                
+                const percent = Math.round(video.volume * 100);
+                const bars = '▮'.repeat(Math.floor(percent / 10)) + '▯'.repeat(10 - Math.floor(percent / 10));
+                toast.textContent = `Volume: ${bars} ${percent}%`;
+                toast.style.display = 'block';
+                
+                // 3秒后消失
+                clearTimeout(toast.timeout);
+                toast.timeout = setTimeout(() => {
+                    toast.style.display = 'none';
+                }, 2000);
+            }
+            
+            // 添加键盘事件监听
+            document.addEventListener('keydown', handleVolumeKeyPress);
+            
+            // 特别针对移动设备的处理
+            if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+                console.log('检测到移动设备，启用移动端音量支持');
+                
+                // 在移动端，物理音量键通常会直接控制媒体音量
+                // 我们确保视频元素是可控制的
+                video.controls = true;
+                
+                // 确保视频元素获取焦点，以便音量键生效
+                setTimeout(() => {
+                    video.focus();
+                }, 1000);
+                
+                // 添加触摸事件，确保视频元素获得焦点
+                document.addEventListener('touchstart', function() {
+                    if (document.activeElement !== video) {
+                        video.focus();
+                    }
+                }, { passive: true });
+            }
+            
+            // ==================== 以下是原有代码 ====================
+            function markUserInteracted() {
+                video.dataset.userInteracted = 'true';
+                loading.textContent = '播放中...';
+                
+                setTimeout(() => {
+                    loading.style.display = 'none';
+                }, 2000);
+            }
+            
+            function updateLoading(text) {
+                loading.textContent = text;
+                loading.style.display = 'block';
+            }
+            
+            async function tryPlay() {
+                if (isPlaying) return false;
+                
+                playAttempts++;
+                console.log(`第 ${playAttempts} 次尝试播放`);
+                
+                try {
+                    video.muted = false;
+                    
+                    if (playAttempts <= 2) {
+                        simulateUserInteraction();
+                    }
+                    
+                    const playPromise = video.play();
+                    
+                    if (playPromise !== undefined) {
+                        await playPromise;
+                        console.log('✅ 播放成功');
+                        isPlaying = true;
+                        markUserInteracted();
+                        return true;
+                    }
+                } catch (error) {
+                    console.log('播放失败:', error.message);
+                }
+                
+                return false;
+            }
+            
+            function simulateUserInteraction() {
+                const events = ['mousedown', 'mouseup', 'click', 'touchstart'];
+                events.forEach(eventType => {
+                    try {
+                        video.dispatchEvent(new Event(eventType));
+                    } catch (e) {}
+                });
+                
+                window.dispatchEvent(new Event('scroll'));
+                window.dispatchEvent(new KeyboardEvent('keydown'));
+            }
+            
+            function initHLS() {
+                console.log('初始化HLS播放器');
+                updateLoading('初始化中...');
+                
+                if (Hls.isSupported()) {
+                    hlsInstance = new Hls({
+                        enableWorker: true,
+                        lowLatencyMode: true,
+                        backBufferLength: 90,
+                        liveDurationInfinity: true,
+                        liveSyncDurationCount: 3
+                    });
+                    
+                    hlsInstance.loadSource(streamUrl);
+                    hlsInstance.attachMedia(video);
+                    
+                    hlsInstance.on(Hls.Events.MEDIA_ATTACHED, () => {
+                        console.log('HLS视频已附加');
+                        updateLoading('视频加载中...');
+                        startPlayback();
+                    });
+                    
+                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+                        console.log('HLS清单已解析，发现', data.levels.length, '个质量等级');
+                        updateLoading('视频已就绪...');
+                    });
+                    
+                    hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                        console.error('HLS错误:', data.type, data.details);
+                        updateLoading('连接中...');
+                        if (data.fatal) {
+                            switch(data.type) {
+                                case Hls.ErrorTypes.NETWORK_ERROR:
+                                    console.log('网络错误，重新加载');
+                                    hlsInstance.startLoad();
+                                    break;
+                                case Hls.ErrorTypes.MEDIA_ERROR:
+                                    console.log('媒体错误，尝试恢复');
+                                    hlsInstance.recoverMediaError();
+                                    break;
+                            }
+                        }
+                    });
+                    
+                    window.hls = hlsInstance;
+                    
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    console.log('使用Safari原生HLS支持');
+                    video.src = streamUrl;
+                    video.addEventListener('canplay', () => {
+                        startPlayback();
+                    });
+                } else {
+                    console.error('当前浏览器不支持HLS');
+                    updateLoading('不支持HLS');
+                }
+            }
+            
+            function startPlayback() {
+                console.log('开始播放策略');
+                updateLoading('准备播放...');
+                
+                const playStrategies = [
+                    () => {
+                        console.log('策略1: 立即播放');
+                        return tryPlay();
+                    },
+                    
+                    () => new Promise(resolve => {
+                        console.log('策略2: 模拟交互');
+                        simulateUserInteraction();
+                        setTimeout(async () => {
+                            if (!isPlaying) {
+                                const success = await tryPlay();
+                                resolve(success);
+                            } else {
+                                resolve(true);
+                            }
+                        }, 100);
+                    }),
+                    
+                    () => new Promise(resolve => setTimeout(async () => {
+                        if (!isPlaying) {
+                            console.log('策略3: 延迟播放');
+                            const success = await tryPlay();
+                            resolve(success);
+                        } else {
+                            resolve(true);
+                        }
+                    }, 200)),
+                    
+                    () => new Promise(resolve => setTimeout(async () => {
+                        if (!isPlaying) {
+                            console.log('策略4: 延迟+交互');
+                            simulateUserInteraction();
+                            const success = await tryPlay();
+                            resolve(success);
+                        } else {
+                            resolve(true);
+                        }
+                    }, 500)),
+                    
+                    () => new Promise(resolve => setTimeout(async () => {
+                        if (!isPlaying) {
+                            console.log('策略5: 最终尝试');
+                            const success = await tryPlay();
+                            resolve(success);
+                        } else {
+                            resolve(true);
+                        }
+                    }, 800)),
+                ];
+                
+                async function executeStrategies() {
+                    let success = false;
+                    
+                    for (let i = 0; i < playStrategies.length; i++) {
+                        if (isPlaying) {
+                            success = true;
+                            break;
+                        }
+                        
+                        success = await playStrategies[i]();
+                        if (success) {
+                            console.log(`策略 ${i + 1} 成功`);
+                            break;
+                        }
+                    }
+                    
+                    if (!success) {
+                        console.log('所有自动播放策略失败，等待用户点击');
+                        updateLoading('点击页面播放');
+                        scheduleMoreAttempts();
+                    }
+                }
+                
+                function scheduleMoreAttempts() {
+                    const delays = [1500, 3000, 5000];
+                    
+                    delays.forEach(delay => {
+                        setTimeout(() => {
+                            if (!isPlaying) {
+                                console.log(`计划尝试: ${delay}ms后`);
+                                simulateUserInteraction();
+                                tryPlay();
+                            }
+                        }, delay);
+                    });
+                }
+                
+                executeStrategies();
+            }
+            
+            window.addEventListener('load', () => {
+                console.log('页面加载完成');
+                console.log('初始音量: ', video.volume * 100 + '%');
+                console.log('静音状态: ', video.muted ? '是' : '否');
+                
+                document.addEventListener('DOMContentLoaded', () => {
+                    try {
+                        document.body.click();
+                        window.scrollBy(0, 1);
+                    } catch (e) {}
+                });
+                
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', initHLS);
+                } else {
+                    initHLS();
+                }
+                
+                document.addEventListener('click', function(e) {
+                    console.log('页面点击，尝试播放');
+                    markUserInteracted();
+                    
+                    if (!isPlaying) {
+                        video.muted = false;
+                        tryPlay();
+                    }
+                }, {once: false});
+                
+                video.addEventListener('click', function(e) {
+                    console.log('视频点击，尝试播放');
+                    markUserInteracted();
+                    
+                    video.muted = false;
+                    tryPlay();
+                });
+                
+                video.addEventListener('canplay', () => {
+                    console.log('视频可以播放了');
+                    if (!isPlaying) {
+                        updateLoading('可以播放了');
+                        setTimeout(() => tryPlay(), 100);
+                    }
+                });
+                
+                video.addEventListener('playing', function() {
+                    console.log('✅ 视频开始播放');
+                    console.log('当前音量：', video.volume * 100 + '%', video.muted ? '(静音)' : '');
+                    isPlaying = true;
+                    markUserInteracted();
+                });
+                
+                setTimeout(() => {
+                    console.log('初始自动交互');
+                    simulateUserInteraction();
+                }, 50);
+            });
+            
+            document.addEventListener('visibilitychange', function() {
+                if (document.visibilityState === 'visible' && !video.paused) {
+                    console.log('页面恢复可见，尝试播放');
+                    video.muted = false;
+                    tryPlay();
+                }
+            });
+            
+        })();
+    </script>
+</body>
+</html>
